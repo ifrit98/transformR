@@ -1,3 +1,6 @@
+library(tensorflow)
+library(keras)
+
 #' Multiplicative attention (Luong)
 #'
 #' Accepts set of hidden states from encoder and concatenates
@@ -12,27 +15,60 @@ MultiplicativeAttention <-
     inherit = KerasLayer,
 
     public = list(
-      encoder_hidden_states = NULL,
+      query_depth = NULL,
+      return_context = NULL,
+      kernel = NULL,
 
-      initialize = function(encoder_hidden_states) {
-        self$encoder_hidden_states <- encoder_hidden_states
+      initialize = function(query_depth, return_context) {
+        self$query_depth <- query_depth
+        self$return_context <- return_context
 
       },
 
       build = function(input_shape) {
+        stopifnot(mode(input_shape) == "list")
 
+        self$kernel <- self$add_weight(
+          'kernel',
+          shape = list(input_shape[[1]][[1]], self$query_depth),
+          initializer = "glorot_normal"
+        )
       },
 
       call = function(x, mask = NULL) {
+        stopifnot(mode(x) == "list")
 
+        c(query, keys) %<-% x
+
+        processed_query <-
+          tf$matmul(query, self$kernel) %>%
+          tf$expand_dims(axis = 1L)
+
+        score <-
+          tf$matmul(processed_query, keys, transpose_b = TRUE) %>%
+          tf$squeeze(axis = 1L)
+
+        if (!is.null(scale)) return(scale * score)
+
+        score
       }
 
     )
   )
 
-batch <- 16L
-units <- 128L # units == query depth
-max_time <- 256L # Sequence length
+
+layer_multiplicative_attention <-
+  function(object,
+           query_depth,
+           return_context = TRUE,
+           name = NULL,
+           trainable = TRUE) {
+    create_layer(object,
+                 list(
+                   query_depth = as.integer(query_depth),
+                   return_context = return_context
+                 ))
+  }
 
 # Vanilla without scale weight
 compute_luong_score <- function(query, keys, query_depth, scale = NULL) {
@@ -45,9 +81,18 @@ compute_luong_score <- function(query, keys, query_depth, scale = NULL) {
     tf$matmul(processed_query, keys, transpose_b = TRUE) %>%
     tf$squeeze(axis = 1L)
 
-  if (!is.null(scale)) return(scale * score)
+  alignments <-
+    tf$nn$softmax(if (is.null(self$scale)) score else self$scale * score)
 
-  score
+  if (self$return_context) {
+    context <-
+      tf$keras$backend$sum(query * alignments,
+                           axis = -1L,
+                           keepdims = TRUE)
+    return(list(alignments, context))
+  }
+
+  alignments
 }
 
 # Vanilla without norm
@@ -67,6 +112,10 @@ compute_bahdanau_score <-
   }
 
 
+batch <- 16L
+units <- 128L # units == query depth
+max_time <- 256L # Sequence length
+
 # Batch = 16, Timesteps = 256, Hidden units = 128
 # (1, 128) is a hidden state at time = 1.
 query <- tf$random$normal(shape = list(batch, max_time))
@@ -76,6 +125,8 @@ scores <- compute_bahdanau_score(query, keys, units)
 scores <- compute_luong_score(query, keys, units)
 
 alignments <- tf$nn$softmax(scores)
+
+
 
 context <-
   tf$keras$backend$sum(query * alignments, axis = -1L, keepdims = TRUE)
@@ -105,23 +156,86 @@ AdditiveAttention <-
     inherit = KerasLayer,
 
     public = list(
-      encoder_hidden_states = NULL,
+      query_depth = NULL,
+      attention_v = NULL,
+      kernel = NULL,
+      return_context = NULL,
 
-      initialize = function(encoder_hidden_states) {
-        self$encoder_hidden_states <- encoder_hidden_states
-
+      initialize = function(query_depth, return_context) {
+        self$query_depth <- query_depth
+        self$return_context <- return_context
       },
 
       build = function(input_shape) {
+        self$attention_v <-
+          tf$Variable(tf$random$normal(shape = list(self$query_depth)))
+
+        self$kernel <- self$add_weight(
+          'kernel',
+          shape = list(input_shape[[1]][[1]], self$query_depth),
+          initializer = "glorot_normal"
+        )
 
       },
 
       call = function(x, mask = NULL) {
+        stopifnot(mode(x) == "list")
 
+        c(query, keys) %<-% x
+
+        # This seems to be an error. Dimensions of RNN output and query depth
+        # should not have to match...
+        if (!self$query_depth == keys$get_shape()[2])
+          stop(
+            paste(
+              "Projection units must equal number of dimensions of keys tensor. Got:",
+              self$query_depth,
+              "and",
+              keys$get_shape()[2]
+            )
+          )
+
+        processed_query <-
+          tf$matmul(query, self$kernel) %>%
+          tf$expand_dims(1L)
+
+        scores <-
+          tf$reduce_sum(self$attention_v * tf$tanh(keys + processed_query),
+                        list(2L))
+
+        alignments <- tf$nn$softmax(scores)
+
+        if (self$return_context) {
+          context <-
+            tf$keras$backend$sum(query * alignments,
+                                 axis = -1L,
+                                 keepdims = TRUE)
+          return(list(alignments, context))
+        }
+
+        alignments
       }
 
     )
   )
+
+layer_additive_attention <-
+  function(object,
+    query_depth,
+    return_context = TRUE,
+    name = NULL,
+    trainable = TRUE) {
+    create_layer(
+      AdditiveAttention,
+      object,
+      list(
+        query_depth = as.integer(query_depth),
+        return_context = return_context,
+        name = name,
+        trainable = trainable
+      )
+    )
+  }
 
 
 
