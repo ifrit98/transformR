@@ -1,7 +1,7 @@
 library(tensorflow)
 library(keras)
 
-#' Multiplicative attention (Luong)
+#' Multiplicative attention (Luong et al. 2016)
 #'
 #' Accepts set of hidden states from encoder and concatenates
 #' them together, then scoring them with decoder hidden state
@@ -10,7 +10,7 @@ library(keras)
 #' timestep t.
 MultiplicativeAttention <-
   R6::R6Class(
-    "BahdanauAttention",
+    "MultiplicativeAttention",
 
     inherit = KerasLayer,
 
@@ -18,10 +18,13 @@ MultiplicativeAttention <-
       query_depth = NULL,
       return_context = NULL,
       kernel = NULL,
+      scale = NULL,
+      use_scale = NULL,
 
-      initialize = function(query_depth, return_context) {
+      initialize = function(query_depth, return_context, use_scale) {
         self$query_depth <- query_depth
         self$return_context <- return_context
+        self$use_scale <- use_scale
 
       },
 
@@ -32,6 +35,12 @@ MultiplicativeAttention <-
           'kernel',
           shape = list(input_shape[[1]][[1]], self$query_depth),
           initializer = "glorot_normal"
+        )
+
+        self$scale <- self$add_weight(
+          'scale',
+          shape = list(),
+          initializer = 'ones'
         )
       },
 
@@ -46,103 +55,62 @@ MultiplicativeAttention <-
 
         score <-
           tf$matmul(processed_query, keys, transpose_b = TRUE) %>%
-          tf$squeeze(axis = 1L)
+          tf$transpose(list(0L, 2L, 1L))
 
-        if (!is.null(scale)) return(scale * score)
+        alignments <-
+          tf$nn$softmax(if (is.null(scale)) score else self$scale * score)
 
-        score
+        if (self$return_context) {
+          context <-
+            tf$keras$backend$sum(keys * alignments,
+                                 axis = -1L,
+                                 keepdims = FALSE)
+          return(list(alignments, context))
+        }
+
+        alignments
       }
 
     )
   )
 
 
+#' Layer wrapper for Luong (multiplicative) attention.
+#'
+#' Takes a list() of (query, key) tensor of shape (batch, hidden_units),
+#' (batch, maxtime, hidden_units) and returns a context vector for the
+#' input sequences.  Query is usually the current hidden state of a
+#' decoder and key is usually output of an RNN encoder (hidden states).
+#'
+#' @export
+#' @example
+#' batch <- 16L
+#' units <- 128L # units == query depth == RNN encoder out units
+#' max_time <- 256L # Sequence length
+#' # query == decoder hidden state at time t (batch, units)
+#' query <- tf$random$normal(shape = list(batch, units))
+#' # key == encoder hiddens states (i.e. return sequences) (batch, maxtime, units)
+#' key <- tf$random$normal(shape = list(batch, max_time, units))
+#' context <- layer_multiplicative_attention(list(query, key), key$get_shape()[-1])
 layer_multiplicative_attention <-
   function(object,
            query_depth,
            return_context = TRUE,
+           use_scale = TRUE,
            name = NULL,
            trainable = TRUE) {
-    create_layer(object,
+    create_layer(MultiplicativeAttention,
+                 object,
                  list(
                    query_depth = as.integer(query_depth),
-                   return_context = return_context
+                   return_context = return_context,
+                   use_scale = use_scale
                  ))
   }
 
-# Vanilla without scale weight
-compute_luong_score <- function(query, keys, query_depth, scale = NULL) {
-
-  processed_query <-
-    layer_dense(query, units = query_depth, use_bias = FALSE) %>%
-    tf$expand_dims(axis = 1L)
-
-  score <-
-    tf$matmul(processed_query, keys, transpose_b = TRUE) %>%
-    tf$squeeze(axis = 1L)
-
-  alignments <-
-    tf$nn$softmax(if (is.null(self$scale)) score else self$scale * score)
-
-  if (self$return_context) {
-    context <-
-      tf$keras$backend$sum(query * alignments,
-                           axis = -1L,
-                           keepdims = TRUE)
-    return(list(alignments, context))
-  }
-
-  alignments
-}
-
-# Vanilla without norm
-compute_bahdanau_score <-
-  function(query, keys, query_depth, attention_v = NULL) {
-
-    if (is.null(attention_v))
-      attention_v <- tf$Variable(tf$random$normal(shape = list(query_depth)))
-    processed_query <-
-      layer_dense(query, units = query_depth, use_bias = FALSE) %>%
-      tf$expand_dims(1L)
-
-    scores <-
-      tf$reduce_sum(attention_v * tf$tanh(keys + processed_query), list(2L))
-
-    scores
-  }
 
 
-batch <- 16L
-units <- 128L # units == query depth
-max_time <- 256L # Sequence length
-
-# Batch = 16, Timesteps = 256, Hidden units = 128
-# (1, 128) is a hidden state at time = 1.
-query <- tf$random$normal(shape = list(batch, max_time))
-keys  <- tf$random$normal(shape = list(batch, max_time, units))
-
-scores <- compute_bahdanau_score(query, keys, units)
-scores <- compute_luong_score(query, keys, units)
-
-alignments <- tf$nn$softmax(scores)
-
-
-
-context <-
-  tf$keras$backend$sum(query * alignments, axis = -1L, keepdims = TRUE)
-
-# Then take context vector and concatenate with hidden state of decoder
-# SHAPES of DECODER OUT and CONTEXT INCORRECT??
-decoder_out <- tf$random$normal(shape = list(batch, units))
-ff_input <- tf$concat(list(context, decoder_out), axis = 1L)
-
-# Pass through a ff layer, the output of which indicates output word of
-# this the current time step.
-## FF no of output units/activation type?
-output <- layer_dense(ff_input, units = 1L, activation = 'sigmoid')
-
-
-#' Additive attention (Bahdanau)
+#' Additive attention (Bahdanau et al. 2015)
 #'
 #' Accepts set of hidden states from encoder and concatenates
 #' them together, then scoring them with decoder hidden state
@@ -167,12 +135,15 @@ AdditiveAttention <-
       },
 
       build = function(input_shape) {
+        query_dims <- input_shape[[1]]
+        keys_dims  <- input_shape[[2]]
+
         self$attention_v <-
           tf$Variable(tf$random$normal(shape = list(self$query_depth)))
 
         self$kernel <- self$add_weight(
           'kernel',
-          shape = list(input_shape[[1]][[1]], self$query_depth),
+          shape = list(query_dims[[1]], self$query_depth),
           initializer = "glorot_normal"
         )
 
@@ -183,15 +154,15 @@ AdditiveAttention <-
 
         c(query, keys) %<-% x
 
-        # This seems to be an error. Dimensions of RNN output and query depth
-        # should not have to match...
         if (!self$query_depth == keys$get_shape()[2])
           stop(
             paste(
-              "Projection units must equal number of dimensions of keys tensor. Got:",
+              "Query projection units must equal number of",
+              "dimensions of keys tensor. Got:",
               self$query_depth,
               "and",
-              keys$get_shape()[2]
+              keys$get_shape()[2],
+              "Perhaps you need to set query_depth to the keys' last dimension"
             )
           )
 
@@ -207,7 +178,7 @@ AdditiveAttention <-
 
         if (self$return_context) {
           context <-
-            tf$keras$backend$sum(query * alignments,
+            tf$keras$backend$sum(keys * tf$expand_dims(alignments, 2L),
                                  axis = -1L,
                                  keepdims = TRUE)
           return(list(alignments, context))
@@ -219,6 +190,24 @@ AdditiveAttention <-
     )
   )
 
+
+#' Layer wrapper for Bahdanau (additive) attention.
+#'
+#' Takes a list() of (query, key) tensor of shape (batch, hidden_units),
+#' (batch, maxtime, hidden_units) and returns a context vector for the
+#' input sequences.  Query is usually the current hidden state of a
+#' decoder and key is usually output of an RNN encoder (hidden states).
+#'
+#' @export
+#' @example
+#' batch <- 16L
+#' units <- 128L # units == query depth == RNN encoder out units
+#' max_time <- 256L # Sequence length
+#' # query == decoder hidden state at time t (batch, units)
+#' query <- tf$random$normal(shape = list(batch, units))
+#' # key == encoder hiddens states (i.e. return sequences) (batch, maxtime, units)
+#' key <- tf$random$normal(shape = list(batch, max_time, units))
+#' context <- layer_additive_attention(list(query, key), key$get_shape()[-1])
 layer_additive_attention <-
   function(object,
     query_depth,
@@ -239,6 +228,8 @@ layer_additive_attention <-
 
 
 
+#' Self attention layer, implementing scaled dot product attention
+#' Vaswani et al. 2017
 SelfAttention <-
   R6::R6Class(
     "SelfAttention",
