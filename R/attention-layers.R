@@ -306,3 +306,75 @@ layer_self_attention <-
                    trainable = trainable
                  ))
   }
+
+        
+        
+        
+# Simple functions to get shapes straight before wrapping in an R6 layer
+ 
+# q: a Tensor with shape [batch, length_q, depth_k]
+# k: a Tensor with shape [batch, length_kv, depth_k]
+# v: a Tensor with shape [batch, length_kv, depth_v]
+dot_product_attention_1d <- function(q, k, v, bias = NULL, dropout = 0) {
+  q_shape <- shape_list2(q)
+  scalarv <- tf$rsqrt(tf$cast(q_shape[[length(q_shape)]], tf$float32))
+  logits  <- tf$matmul(q * scalar, k, transpose_b = TRUE)
+  
+  if (!is.null(bias))
+    logits <- logits + bias
+  
+  weights <- tf$nn$softmax(logits, name = "attention_weights")
+  
+  x <- tf$matmul(weights, v)
+  
+  x
+}
+
+
+self_attention <-
+  function(x,
+           filter_depth = 64L,
+           output_depth = 64L,
+           num_parts = 3L,
+           dropout = 0.2,
+           share_kv = TRUE) {
+    
+  x_shape    <- shape_list2(x)
+  part_depth <- as.integer(floor(filter_depth / num_parts))
+  
+  combined <- layer_dense(
+    x, filter_depth * 3L, use_bias = FALSE, name = "qkv_transform")
+  
+  if (!share_kv)
+    c(q, k, v) %<-% tf$split(combined, 3L, axis = 2L)
+  else {
+    q <- layer_dense(
+          x, filter_depth, use_bias = FALSE, name = "q_transform")
+    
+    kv_combined <-
+      layer_dense(
+        tf$concat(list(x, x), axis = 1L),
+        filter_depth,
+        use_bias = FALSE,
+        name = "kv_transform")
+    
+    c(k, v) %<-% 
+      tf$split(kv_combined, list(x_shape[[2]], x_shape[[2]]), axis = 1L)
+  }
+  
+  q <- q * tf$pow(tf$cast(part_depth, tf$float32), tf$constant(-0.5))
+  
+  bias <- NULL
+  x <- dot_product_attention_1d(q, k, v, bias, dropout)
+  x <- tf$reshape(x, list(x_shape[[1]], x_shape[[2]], filter_depth))
+  x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
+  
+  x
+}
+
+
+batch    <- 16L
+length   <- 256L
+channels <- 128L
+x <- tf$random$normal(shape = list(batch, length, channels))
+y <- self_attention(x)
