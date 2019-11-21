@@ -407,6 +407,7 @@ LocalSelfAttention <- R6::R6Class(
 )
 
 
+      
 #' Keras layer wrapper for local self attention.
 #' @export
 layer_local_self_attention <- function(object,
@@ -537,6 +538,160 @@ dot_product_attention_1d <- function(q, k, v, bias = NULL, dropout = 0) {
   
   x
 }
+      
+
+#' antecedent: Tensor with shape [batch, length, channels]
+#' depth: specifying projection layer depth
+#' filter_width: how wide should the attention component be
+#' padding: must be in: c("valid", "same", "left")
+.compute_attention_component <- function(antecedent,
+                                         depth,
+                                         filter_width = 1L,
+                                         padding = 'valid',
+                                         name = 'c') {
+  layer_lambda(x, function(x) {
+    out <- 
+      if (filter_width == 1L) 
+        layer_dense(x, depth, use_bias = FALSE, name = name)
+    else
+      layer_conv_1d(x, depth, filter_width, padding = padding, name = name)
+    
+    out
+  }, name = ".compute_attention_component")
+}
+
+      
+      
+#' query  [batch, length_q, channels]
+#' memory [batch, length_m, channels] (optional, usually RNN hidden states)
+#' return [batch, length, depth] (q, k ,v) tensors      
+#' @export
+layer_compute_qkv <- function(query,
+                              memory = NULL,
+                              key_depth = 64L,
+                              value_depth = 64L,
+                              q_filter_width = 1L,
+                              kv_filter_width = 1L,
+                              q_padding = 'valid',
+                              kv_padding = 'valid') {
+  layer_lambda(x, function() {
+    if (is.null(memory)) memory <- query
+    q <- 
+      .compute_attention_component(query, key_depth, q_filter_width, q_padding, "q")
+    
+    k <- 
+      .compute_attention_component(memory, key_depth, kv_filter_width, kv_padding, "k")
+    
+    v <- 
+      .compute_attention_component(memory, key_depth, kv_filter_width, kv_padding, "v")
+    
+    c(q, k, v)
+  }, name = "layer_compute_qkv")
+}
+      
+      
+      
+      
+# TODO: Make this an R6 layer?
+#' Input query, key, and value matrices are used to compute dot product
+#' attention. (Vaswani et al. 2017)
+#' q: a Tensor with shape [batch, length_q, depth_k]
+#' k: a Tensor with shape [batch, length_kv, depth_k]
+#' v: a Tensor with shape [batch, length_kv, depth_v]      
+#' @export
+layer_dot_product_attention_1d <- 
+  function(q, k, v, bias = NULL, dropout = 0) {
+  
+  layer_lambda(c(q,k,v), function(x){
+    
+    c(q,k,v) %<-% x
+    
+    q_shape <- shape_list2(q)
+    
+    scalar <- tf$math$rsqrt(tf$cast(q_shape[[length(q_shape)]], tf$float32))
+    logits <- tf$matmul(q * scalar, k, transpose_b = TRUE)
+    
+    if (!is.null(bias))
+      logits <- logits + bias
+    
+    weights <- tf$nn$softmax(logits, name = "attention_weights")
+    
+    x <- tf$matmul(weights, v)
+    
+    x
+  }, name = "dot_product_attention_1d")
+}
+
+      
+# TODO: make this an R6 layer?
+#' Takes input tensor of shape [batch, seqlen, channels] and
+#' creates query, key, and value tensors to pass to attention
+#' mechanisms downstream.
+#' 
+#' query shape [batch, seqlen, filter_depth]
+#' key shape   [batch, seqlen, filter_depth]
+#' value shape [batch, seqlen, filter_depth]      
+#' @export
+layer_create_qkv <- 
+  function(x, filter_depth, num_parts = 1L, share_kv = FALSE) {
+    layer_lambda(x, function(x) {
+      x_shape    <- shape_list2(x)
+      part_depth <- as.integer(floor(filter_depth / num_parts))
+      
+      if (!share_kv) {
+        combined <- layer_dense(
+          x, filter_depth * 3L, use_bias = FALSE, name = "qkv_transform")
+      
+        c(q, k, v) %<-% tf$split(combined, 3L, axis = 2L)
+      }
+      else {
+        browser()
+        q <- layer_dense(
+          x, filter_depth, use_bias = FALSE, name = "q_transform")
+        
+        kv_combined <-
+          layer_dense(
+            tf$concat(list(x, x), axis = 1L),
+            filter_depth,
+            use_bias = FALSE,
+            name = "kv_transform")
+        
+        c(k, v) %<-% 
+          tf$split(kv_combined, list(x_shape[[2]], x_shape[[2]]), axis = 1L)
+      }
+      
+      q <- q * tf$pow(tf$cast(part_depth, tf$float32), tf$constant(-0.5))
+      
+      c(q, k, v)
+    }, name = "create_qkv")
+}
+     
+      
+      
+      
+#' @export
+layer_self_attention_simple <- 
+  function(x,
+           filter_depth = 32L,
+           output_depth = 64L,
+           num_parts = 3L,
+           dropout = 0,
+           share_kv = TRUE) {
+    layer_lambda(x, function(x) {
+      x_shape <- shape_list2(x)
+      
+      c(q, k, v) %<-% layer_create_qkv(x, filter_depth, num_parts, share_kv)
+      
+      bias <- NULL
+      x <- layer_dot_product_attention_1d(q, k, v, bias, dropout)
+      x <- tf$reshape(x, list(x_shape[[1]], x_shape[[2]], filter_depth))
+      x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
+      
+      x
+    }, name = "self_attention_simple")
+  }
+      
+      
 
 
 self_attention <-
@@ -581,8 +736,8 @@ self_attention <-
 }
 
 
-batch    <- 16L
-length   <- 256L
-channels <- 128L
-x <- tf$random$normal(shape = list(batch, length, channels))
-y <- self_attention(x)
+# batch    <- 16L
+# length   <- 256L
+# channels <- 128L
+# x <- tf$random$normal(shape = list(batch, length, channels))
+# y <- self_attention(x)
