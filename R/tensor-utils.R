@@ -14,7 +14,7 @@ shape_list <-
     
     ret <- vector('list', length(dims))
     
-    map2(dims, shape, function(x, y) {
+    purrr::map2(dims, shape, function(x, y) {
       dim <- x
       
       if (is.null(dim)) 
@@ -35,14 +35,14 @@ shape_list2 <-
     dims <- x$get_shape()$dims    
     if (is.null(dims)) return(tf$shape(x))
     
-    dims <- map(dims, ~.$value)
+    dims <- purrr::map(dims, ~.$value)
     
     sess <- tf$keras$backend$get_session()
     shape <- tf$shape(x)$eval(session = sess)
     
     ret <- vector('list', length(dims))
     
-    map2(dims, shape, function(x, y) {
+    purrr::map2(dims, shape, function(x, y) {
       dim <- x
       
       if (is.null(dim)) 
