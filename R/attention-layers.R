@@ -741,3 +741,104 @@ self_attention <-
 # channels <- 128L
 # x <- tf$random$normal(shape = list(batch, length, channels))
 # y <- self_attention(x)
+
+      
+      
+      
+
+
+#' Reshape x so that the last dimension becomes two dimensions.
+split_last_dimension <- function(x, n) {
+  x_shape <- shape_list2(x)
+  
+  n <- as.integer(n)
+  m <- x_shape[[length(x_shape)]]
+  
+  stopifnot(m %% n == 0)
+
+  out <- 
+    tf$reshape(x, c(x_shape[-length(x_shape)], list(n, as.integer(m %/% n))))
+  
+  out
+}
+
+
+#' Split channels (dimension 2) into multiple heads (becomes dimension 1).
+#' x Tensor shape: [batch, length, channels]
+#' num_heads integer
+split_heads <- function(x, num_heads) {
+  out <- tf$transpose(split_last_dimension(x, num_heads), 
+                      perm = list(0L, 2L, 1L, 3L))
+  out
+}
+
+
+#' Reshape x so that the last two dimension become one.
+combine_last_two_dimensions <- function(x) {
+  x_shape <- shape_list2(x)
+  browser()
+  c(a, b) %<-% x_shape[-c(1:(length(x_shape)-2))]
+  
+  tf$reshape(x, c(x_shape[c(1,2)], as.integer(a * b)))
+}
+
+
+#' Inverse of split_heads.
+combine_heads <- function(x) {
+  combine_last_two_dimensions(tf$transpose(x, list(0L, 2L, 1L, 3L)))  
+}
+
+# TODO: Finish up!
+multihead_attention <- function(query,
+                                memory,
+                                bias,
+                                key_depth,
+                                value_depth,
+                                output_depth,
+                                num_heads,
+                                dropout,
+                                attention_type = "dot_product",
+                                q_filter_width = 1L,
+                                kv_filter_width = 1L,
+                                q_padding="VALID",
+                                kv_padding="VALID",
+                                max_area_width=1,
+                                max_area_height=1,
+                                memory_height=1,
+                                area_key_mode="mean",
+                                area_value_mode="sum",
+                                vars_3d = FALSE) {
+  stopifnot(key_depth %% num_heads == 0, value_depth %% num_heads == 0)
+
+  vars_3d_num_heads <- if (vars_3d) num_heads else 0
+  
+  c(q, k, v) %<-% compute_qkv(query, 
+                              memory, 
+                              key_depth, 
+                              value_depth, 
+                              q_filter_width, 
+                              vars_3d_num_heads = vars_3d_num_heads)
+
+  q <- split_heads(q, num_heads)
+  k <- split_heads(k, num_heads)
+  v <- split_heads(v, num_heads)
+  
+  key_depth_per_head <- total_key_depth %/% num_heads
+  
+  if (!vars_3d) 
+    q <- tf$pow(tf$cast(key_depth_per_head, tf$float32), tf$constant(-0.5))
+
+  bias <- NULL
+  if (attention_type == "dot_product")
+    if (max_area_width > 1 | max_area_height > 1)
+      x <- dot_product_area_attention_1d(q, k, v, bias, dropout)
+    else
+      x <- dot_product_attention_1d(q, k, v, bias, dropout)
+  else
+    stop("Other attention types currently unimplemented...")
+
+  x <- combine_heads(x)
+    
+}
+
+     
