@@ -227,6 +227,214 @@ layer_additive_attention <-
   }
 
 
+        
+#' R6 class containing local self attention logic
+LocalSelfAttention <- R6::R6Class(
+  "LocalSelfAttention",
+  
+  inherit = KerasLayer,
+  
+  public = list(
+    
+    units = NULL,
+    attention_width = NULL,
+    attention_type = NULL,
+    use_attention_bias = NULL,
+    kernel_initializer = NULL,
+    kernel_regularizer = NULL,
+    bias_initializer = NULL,
+    bias_regularizer = NULL,
+    Wt = NULL,
+    Wx = NULL,
+    Wa = NULL,
+    bh = NULL,
+    ba = NULL,
+    
+    initialize = function(units,
+                          attention_width,
+                          attention_type,
+                          use_attention_bias,
+                          kernel_initializer,
+                          kernel_regularizer,
+                          bias_initializer,
+                          bias_regularizer) {
+      self$units              <- units
+      self$attention_width    <- attention_width
+      self$attention_type     <- attention_type
+      self$use_attention_bias <- use_attention_bias
+      self$kernel_initializer <- kernel_initializer
+      self$kernel_regularizer <- kernel_regularizer
+      self$bias_initializer   <- bias_initializer
+      self$bias_regularizer   <- bias_regularizer
+    },
+    
+    build_additive_attention = function(channels) {
+      self$Wt <- self$add_weight(
+        shape = list(channels, self$units),
+        initializer = self$kernel_initializer,
+        regularizer = self$kernel_regularizer,
+        name = "Wt"
+      )
+      
+      self$Wx <- self$add_weight(
+        shape = list(channels, self$units),
+        initializer = self$kernel_initializer,
+        name = "Wx"
+      )
+      
+      self$Wa <- self$add_weight(
+        shape = list(self$units, 1L),
+        initializer = self$kernel_initializer,
+        name = "Wa"
+      )
+      
+      if (self$use_attention_bias) {
+        self$bh <- self$add_weight(
+          shape = list(self$units),
+          initializer = self$bias_initializer,
+          name = "bh"
+        )
+      
+        self$ba <- self$add_weight(
+          shape = list(1L),
+          initializer = self$bias_initializer,
+          name = "ba"
+        )
+      }
+    },
+    
+    build_multiplicative_attention = function(channels) {
+      self$Wa <- self$add_weight(
+        shape = list(channels, channels),
+        initializer = self$kernel_initializer,
+        name = "Wa"
+      )
+      
+      if (self$use_attention_bias)      
+        self$ba <- self$add_weight(
+          shape = list(1L),
+          initializer = self$bias_initializer,
+          name = "ba"
+        )
+    },
+    
+    build = function(input_shape) {
+      channels <- input_shape[[length(input_shape)]]
+      
+      if (!self$attention_type %in% c("additive", "multiplicitive"))
+        stop("attention_type must be one of: 'additive', 'multiplicative'")
+      
+      if (self$attention_type == "additive")
+        self$build_additive_attention(channels)
+      else
+        self$build_multiplicative_attention(channels)
+      
+    },
+    
+    call = function(x, mask = NULL) {
+      seqlen <- shape_list2(x)[[2]]
+      
+      score <- 
+        if (self$attention_type == "additive")
+          self$additive_score(x)
+        else 
+          self$multiplicative_score(x)
+      
+      # Localize
+      lower <- 
+        tf$range(0L, seqlen) - as.integer(self$attention_width / 2L) %>% 
+        tf$expand_dims(-1L)
+      
+      upper <- lower + self$attention_width
+      indices <- tf$expand_dims(tf$range(0L, seqlen), axis = 0L)
+
+      # Mask out anything wider than attention_width and apply scores
+      emission <- 
+        score * 
+        tf$cast(lower <= indices, tf$float32) * 
+        tf$cast(upper > indices, tf$float32) 
+  
+      sum <- tf$keras$backend$sum(emission, axis = -1L, keepdims = TRUE)
+      
+      attention <- emission / (sum + tf$keras$backend$epsilon())
+
+      v <- tf$matmul(attention, x)
+      
+      v
+    },
+    
+    additive_score = function(x) {
+      shape  <- shape_list2(x)
+      batch  <- shape[[1]]
+      seqlen <- shape[[2]]
+      
+      q <- tf$expand_dims(tf$matmul(x, self$Wt), 2L)
+      k <- tf$expand_dims(tf$matmul(x, self$Wx), 1L)
+      
+      h <- tf$tanh(q + k + if (!is.null(self$bh)) self$bh else tf$constant(0L))
+
+      e <- tf$reshape(tf$matmul(h, self$Wa) + 
+                        if (!is.null(self$ba)) self$ba
+                        else tf$constant(0L), 
+                      list(batch, seqlen, seqlen))
+      e
+    },
+    
+    multiplicative_score = function(x) {
+      browser()
+      score <- tf$keras$backend$batch_dot(
+        tf$matmul(x, self$Wa),
+        tf$transpose(x, perm = list(0L, 2L, 1L))
+      )
+      
+      if (!is.null(self$ba))
+        score <- score + self$ba
+      
+      score
+    },
+    
+    compute_output_shape = function(input_shape) {
+      output_shape <- input_shape
+      if (self$return_attention)
+        output_shape <- list(output_shape,
+                             list(input_shape[[1]],
+                                  output_shape[[2]],
+                                  input_shape[[2]]))
+      output_shape
+    }
+    
+  )
+)
+
+
+#' Keras layer wrapper for local self attention.
+#' @export
+layer_local_self_attention <- function(object,
+                                       units,
+                                       attention_width,
+                                       attention_type = "additive",
+                                       use_attention_bias = TRUE,
+                                       kernel_initializer = 'glorot_uniform',
+                                       kernel_regularizer = NULL,
+                                       bias_initializer = 'zeors',
+                                       bias_regularizer = NULL) {
+  create_layer(
+    LocalSelfAttention,
+    object,
+    list(
+      units = as.integer(units),
+      attention_width = as.integer(attention_width),
+      attention_type = attention_type,
+      use_attention_bias = use_attention_bias,
+      kernel_initializer = tf$keras$initializers$get(kernel_initializer),
+      kernel_regularizer = tf$keras$regularizers$get(kernel_regularizer),
+      bias_initializer = tf$keras$initializers$get(bias_initializer),
+      bias_regularizer = tf$keras$initializers$get(bias_initializer)
+    )
+  )
+}
+        
+        
 
 #' Self attention layer, implementing scaled dot product attention
 #' Vaswani et al. 2017
