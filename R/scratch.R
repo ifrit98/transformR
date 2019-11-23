@@ -73,3 +73,15 @@ ff_input <- tf$concat(list(context, decoder_out), axis = 1L)
 # this the current time step.
 ## FF no of output units/activation type?
 output <- layer_dense(ff_input, units = 1L, activation = 'sigmoid')
+
+
+
+
+
+# num_heads <- 4L
+# x <- tf$random$normal(list(16L, 8192L, 64L))
+# c(q,k,v) %<-% compute_qkv(x)
+# q <- split_heads(q, num_heads)
+# k <- split_heads(k, num_heads)
+# v <- split_heads(v, num_heads)
+# y <- local_attention_1d(q, k, v)
