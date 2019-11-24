@@ -1,5 +1,22 @@
 
 
+#' R create_layer wrapper for keras LayerNormalization()
+#' @export
+layer_normalization <-
+  function(object, axis = -1L, epsilon = 0.001, center = TRUE,
+           scale = TRUE, beta_initializer = 'zeros', gamma_initializer = 'ones',
+           beta_regularizer = NULL, gamma_regularizer = NULL, beta_constraint = NULL,
+           gamma_constraint = NULL, trainable = TRUE, name = NULL) {
+    create_layer(
+      tf$keras$layers$LayerNormalization, object,
+      list(axis = as.integer(axis), epsilon = epsilon, center = center,
+      scale = scale, beta_initializer = beta_initializer,
+      gamma_initializer = gamma_initializer, beta_regularizer = beta_regularizer,
+      gamma_regularizer = gamma_regularizer, beta_constraint = beta_constraint,
+      gamma_constraint = gamma_constraint, trainable = trainable, name = name))
+  }
+
+
 
 layer_multihead_attention <- function(query,
                                       memory = NULL,
