@@ -1,5 +1,6 @@
 
-# Vanilla without scale weight
+#' Vanilla without scale weight
+#' @export
 compute_luong_score <-
   function(query, keys, query_depth, scale = NULL, return_context = TRUE) {
     processed_query <-
@@ -25,7 +26,9 @@ compute_luong_score <-
     alignments
   }
 
-# Vanilla without norm
+
+#' Vanilla without norm
+#' @export
 compute_bahdanau_score <-
   function(query, keys, query_depth, attention_v = NULL) {
 
@@ -42,38 +45,38 @@ compute_bahdanau_score <-
   }
 
 
-batch <- 16L
-units <- 128L # units == query depth == RNN encoder out units
-max_time <- 256L # Sequence length
-
-# Batch = 16, Timesteps = 256, Hidden units = 128
-# (1, 128) is a hidden state at time = t.
-
-# query == decoder hidden state at time t (batch, units)
-query <- tf$random$normal(shape = list(batch, units))
-# keys == encoder hiddens states (i.e. return sequences) (batch, maxtime, units)
-keys  <- tf$random$normal(shape = list(batch, max_time, units))
-
-scores <- compute_bahdanau_score(query, keys, units)
-scores <- compute_luong_score(query, keys, units)
-
-alignments <- tf$nn$softmax(scores)
-
-
-
-context <-
-  tf$keras$backend$sum(query * alignments, axis = -1L, keepdims = TRUE)
-
-# Then take context vector and concatenate with hidden state of decoder
-# SHAPES of DECODER OUT and CONTEXT INCORRECT??
-decoder_out <- tf$random$normal(shape = list(batch, units))
-ff_input <- tf$concat(list(context, decoder_out), axis = 1L)
-
-# Pass through a ff layer, the output of which indicates output word of
-# this the current time step.
-## FF no of output units/activation type?
-output <- layer_dense(ff_input, units = 1L, activation = 'sigmoid')
-
+# batch <- 16L
+# units <- 128L # units == query depth == RNN encoder out units
+# max_time <- 256L # Sequence length
+#
+# # Batch = 16, Timesteps = 256, Hidden units = 128
+# # (1, 128) is a hidden state at time = t.
+#
+# # query == decoder hidden state at time t (batch, units)
+# query <- tf$random$normal(shape = list(batch, units))
+# # keys == encoder hiddens states (i.e. return sequences) (batch, maxtime, units)
+# keys  <- tf$random$normal(shape = list(batch, max_time, units))
+#
+# scores <- compute_bahdanau_score(query, keys, units)
+# scores <- compute_luong_score(query, keys, units)
+#
+# alignments <- tf$nn$softmax(scores)
+#
+#
+#
+# context <-
+#   tf$keras$backend$sum(query * alignments, axis = -1L, keepdims = TRUE)
+#
+# # Then take context vector and concatenate with hidden state of decoder
+# # SHAPES of DECODER OUT and CONTEXT INCORRECT??
+# decoder_out <- tf$random$normal(shape = list(batch, units))
+# ff_input <- tf$concat(list(context, decoder_out), axis = 1L)
+#
+# # Pass through a ff layer, the output of which indicates output word of
+# # this the current time step.
+# ## FF no of output units/activation type?
+# output <- layer_dense(ff_input, units = 1L, activation = 'sigmoid')
+#
 
 
 

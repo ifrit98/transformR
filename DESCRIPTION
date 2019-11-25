@@ -11,7 +11,8 @@ Encoding: UTF-8
 LazyData: true
 Imports:
   tensorflow,
+  keras,
   tfdatasets,
   tfautograph,
-  keras,
   reticulate
+RoxygenNote: 7.0.0

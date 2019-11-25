@@ -1,3 +1,9 @@
+## TODO: FIX NESTED LAYER LAMBDA ISSUES (MULTIHEAD_ATTENTION)
+# Solution might be to house mutihead_attention and/or encoder_fun
+# as R6 layers that may (or may not) employ non-nested lambda sub_layers
+
+## CONFIRMED: Cannot nest lambda layers, as calls to infer output_shape
+# creates competing dims.  R6 or plain 'ol functions, or one top-level lambda
 
 
 #' R create_layer wrapper for keras LayerNormalization()
@@ -17,7 +23,7 @@ layer_normalization <-
   }
 
 
-
+#' Lambda layer implementation of multihead_attention
 layer_multihead_attention <- function(query,
                                       memory = NULL,
                                       bias = NULL,
@@ -29,8 +35,8 @@ layer_multihead_attention <- function(query,
                                       attention_type = "dot_product",
                                       q_filter_width = 1L,
                                       kv_filter_width = 1L,
-                                      q_padding = "VALID",
-                                      kv_padding = "VALID",
+                                      q_padding = "SAME",
+                                      kv_padding = "SAME",
                                       max_area_width = 1L,
                                       max_area_height = 1L,
                                       memory_height = 1L,
@@ -48,12 +54,15 @@ layer_multihead_attention <- function(query,
 
     vars_3d_num_heads <- if (vars_3d) num_heads else 0
 
+    browser()
+    # c(q, k, v) %<-% layer_compute_qkv_v2(x = query, filter_depth = key_depth)
     c(q, k, v) %<-% layer_compute_qkv(query = query,
                                       memory = memory,
                                       key_depth = key_depth,
                                       value_depth = value_depth,
                                       q_filter_width = q_filter_width,
                                       vars_3d_num_heads = vars_3d_num_heads)
+
 
     q <- split_heads(q, num_heads)
     k <- split_heads(k, num_heads)
@@ -64,6 +73,7 @@ layer_multihead_attention <- function(query,
     if (!vars_3d)
       q %<>% `*`(key_depth_per_head^(-0.5))
 
+    browser()
     bias <- NULL
     if (attention_type == "dot_product")
       if (max_area_width > 1 | max_area_height > 1)
@@ -79,22 +89,25 @@ layer_multihead_attention <- function(query,
 
     x <-
       if (vars_3d)
-        tf$get_variable("o", list(num_heads,
-                                  as.integer(value_depth %/% num_heads),
-                                  output_depth),
-                        initializer = tf$glorot_normal_initializer) %>%
+        tf$compat$v1$get_variable(
+          "o",
+          list(num_heads,
+               as.integer(value_depth %/% num_heads),
+               output_depth),
+          initializer = tf$glorot_normal_initializer
+        ) %>%
       tf$cast(x$dtype) %>%
-      tf$reshape(list(value_depth, output_depth)) %>%
-      {tf$tensordot(x, ., axes = 1L)}
-    else
-      tf$matmul(x,
-                tf$get_variable(
-                  name  = "output_kernel",
-                  shape = list(x_shape[[length(x_shape)]], output_depth),
-                  dtype = x$dtype,
-                  trainable = TRUE
-                ))
-
+        tf$reshape(list(value_depth, output_depth)) %>%
+        {tf$tensordot(x, ., axes = 1L)}
+      else
+        tf$matmul(x,
+                  tf$get_variable(
+                    name  = "multihead_output_kernel",
+                    shape = list(x_shape[[length(x_shape)]], output_depth),
+                    dtype = x$dtype,
+                    trainable = TRUE
+                  ))
+      # x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
     x
 
   }, name = "multihead_attention")
@@ -118,8 +131,8 @@ multihead_attention <- function(query,
                                 attention_type = "dot_product",
                                 q_filter_width = 1L,
                                 kv_filter_width = 1L,
-                                q_padding = "VALID",
-                                kv_padding = "VALID",
+                                q_padding = "SAME",
+                                kv_padding = "SAME",
                                 max_area_width = 1L,
                                 max_area_height = 1L,
                                 memory_height = 1L,
@@ -136,6 +149,7 @@ multihead_attention <- function(query,
                                     key_depth,
                                     value_depth,
                                     q_filter_width,
+                                    kv_filter_width,
                                     vars_3d_num_heads = vars_3d_num_heads)
 
   q <- split_heads(q, num_heads)
@@ -258,14 +272,61 @@ layer_self_attention_simple <-
 #' antecedent: Tensor with shape [batch, length, channels]
 #' depth: specifying projection layer depth
 #' filter_width: how wide should the attention component be
-#' padding: must be in: c("valid", "same", "left")
+#' padding: must be in: c("VALID", "SAME", "LEFT")
+compute_attention_component <- function(antecedent,
+                                         depth,
+                                         filter_width = 1L,
+                                         padding = 'SAME',
+                                         name = 'c',
+                                         vars_3d_num_heads = 0L) {
+  if (vars_3d_num_heads > 0) {
+    stopifnot(filter_width == 1)
+
+    input_shape <- shape_list2(antecedent)
+    input_depth <- input_shape[[length(input_shape)]]
+    depth_per_head <- depth %/% vars_3d_num_heads
+    stddev <- input_depth^(-0.5)
+
+    if ("q" %in% name) stddev %<>% `*`(depth_per_head^(-0.5))
+
+    var <- tf$compat$v1$get_variable(
+      name,
+      shape = list(
+        input_depth,
+        vars_3d_num_heads,
+        as.integer(depth %/% vars_3d_num_heads)
+      ),
+
+      initializer = tf$random_normal_initializer(stddev = stddev))
+
+    var %<>%
+      tf$cast(dtype = antecedent$dtype) %>%
+      tf$reshape(shape = list(input_depth, depth))
+
+    return(tf$tensordot(antecedent, var, axes = 1L))
+  }
+
+  out <-
+    if (filter_width == 1L)
+      layer_dense(antecedent, depth, use_bias = FALSE, name = name)
+  else
+    layer_conv_1d(antecedent, depth, filter_width, padding = padding, name = name)
+
+  out
+}
+
+
+#' antecedent: Tensor with shape [batch, length, channels]
+#' depth: specifying projection layer depth
+#' filter_width: how wide should the attention component be
+#' padding: must be in: c("VALID", "SAME", "LEFT")
 .compute_attention_component <- function(antecedent,
                                          depth,
                                          filter_width = 1L,
-                                         padding = 'valid',
+                                         padding = 'SAME',
                                          name = 'c',
                                          vars_3d_num_heads = 0L) {
-  layer_lambda(x, function(x) {
+  layer_lambda(antecedent, function(antecedent) {
 
     if (vars_3d_num_heads > 0) {
       stopifnot(filter_width == 1)
@@ -297,8 +358,8 @@ layer_self_attention_simple <-
     out <-
       if (filter_width == 1L)
         layer_dense(antecedent, depth, use_bias = FALSE, name = name)
-    else
-      layer_conv_1d(antecedent, depth, filter_width, padding = padding, name = name)
+      else
+        layer_conv_1d(antecedent, depth, filter_width, padding = padding, name = name)
 
     out
   }, name = "compute_attention_component")
@@ -318,9 +379,10 @@ layer_compute_qkv <- function(query,
                               value_depth = 64L,
                               q_filter_width = 1L,
                               kv_filter_width = 1L,
-                              q_padding = 'valid',
-                              kv_padding = 'valid',
+                              q_padding = 'SAME',
+                              kv_padding = 'SAME',
                               vars_3d_num_heads = 0L) {
+
 
   x <- if(!is.null(memory)) c(query, memory) else query
 
@@ -333,22 +395,23 @@ layer_compute_qkv <- function(query,
 
     if (is.null(memory))
       memory <- query
-    q <- .compute_attention_component(query,
+
+    q <- compute_attention_component(query,
                                       key_depth,
                                       q_filter_width,
                                       q_padding,
                                       name = "q",
                                       vars_3d_num_heads = vars_3d_num_heads)
 
-    k <- .compute_attention_component(memory,
+    k <- compute_attention_component(memory,
                                       key_depth,
                                       kv_filter_width,
                                       kv_padding,
                                       name = "k",
                                       vars_3d_num_heads = vars_3d_num_heads)
 
-    v <- .compute_attention_component(memory,
-                                      key_depth,
+    v <- compute_attention_component(memory,
+                                      value_depth,
                                       kv_filter_width,
                                       kv_padding,
                                       name = "v",
